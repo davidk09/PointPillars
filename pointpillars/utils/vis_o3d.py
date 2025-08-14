@@ -1,8 +1,7 @@
 import cv2
 import numpy as np
-import open3d as o3d
 import os
-from pointpillars.utils import bbox3d2corners
+from .process import bbox3d2corners  # convert (n,7) -> (n,8,3) when needed
 
 
 COLORS = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0]]
@@ -24,99 +23,101 @@ LINES = [
     ]
 
 
-def npy2ply(npy):
-    ply = o3d.geometry.PointCloud()
-    ply.points = o3d.utility.Vector3dVector(npy[:, :3])
-    density = npy[:, 3]
-    colors = [[item, item, item] for item in density]
-    ply.colors = o3d.utility.Vector3dVector(colors)
-    return ply
+def vis_pc(pc, bboxes=None, labels=None, out_path=None):
+    """
+    Project point cloud to a BEV-like image and save it.
+    - pc: np.ndarray (N, >=3) with columns [x, y, z, ...] (lidar coords)
+    - bboxes: optional, either (n,7) lidar boxes or (n,8,3) corners
+    - labels: optional labels for boxes (used to color boxes)
+    - out_path: optional path under which to save the image. If None saves to figures/vis_pc.png
+    """
+    img_h, img_w = 800, 800
+    vis_img = 255 * np.ones((img_h, img_w, 3), dtype=np.uint8)
+
+    # BEV projection ranges (meters)
+    x_min, x_max = 0.0, 70.4
+    y_min, y_max = -40.0, 40.0
+
+    # pixel scale
+    scale_x = (img_w - 1) / (x_max - x_min)
+    scale_y = (img_h - 1) / (y_max - y_min)
+
+    # draw points
+    if isinstance(pc, np.ndarray) and pc.ndim == 2 and pc.shape[1] >= 3 and len(pc) > 0:
+        xs = pc[:, 0]
+        ys = pc[:, 1]
+        x_mask = (xs >= x_min) & (xs <= x_max)
+        y_mask = (ys >= y_min) & (ys <= y_max)
+        mask = x_mask & y_mask
+        xs, ys = xs[mask], ys[mask]
+        x_pix = ((xs - x_min) * scale_x).astype(np.int32)
+        y_pix = (img_h - 1 - (ys - y_min) * scale_y).astype(np.int32)
+        # clamp
+        x_pix = np.clip(x_pix, 0, img_w - 1)
+        y_pix = np.clip(y_pix, 0, img_h - 1)
+        for x, y in zip(x_pix, y_pix):
+            vis_img[y, x] = (0, 255, 0)  # green
+
+    # handle bboxes: accept (n,7) or (n,8,3)
+    corners = None
+    if bboxes is not None:
+        bboxes = np.asarray(bboxes)
+        if bboxes.ndim == 2 and bboxes.shape[1] == 7:
+            # convert to corners
+            try:
+                corners = bbox3d2corners(bboxes)  # (n,8,3)
+            except Exception:
+                corners = None
+        elif bboxes.ndim == 3 and bboxes.shape[1] == 8 and bboxes.shape[2] >= 2:
+            corners = bboxes
+
+    if corners is not None:
+        for i, box in enumerate(corners):
+            pts = box[:, :2].copy()
+            px = ((pts[:, 0] - x_min) * scale_x)
+            py = (img_h - 1 - (pts[:, 1] - y_min) * scale_y)
+            pts_px = np.stack([px, py], axis=1).astype(np.int32)
+            pts_px = pts_px.reshape((-1, 1, 2))
+            color = (int(COLORS_IMG[labels[i]][0]) if (labels is not None and 0 <= labels[i] < len(COLORS_IMG)) else 0,
+                     int(COLORS_IMG[labels[i]][1]) if (labels is not None and 0 <= labels[i] < len(COLORS_IMG)) else 0,
+                     int(COLORS_IMG[labels[i]][2]) if (labels is not None and 0 <= labels[i] < len(COLORS_IMG)) else 255)
+            cv2.polylines(vis_img, [pts_px], isClosed=True, color=color, thickness=2)
+
+    os.makedirs("figures", exist_ok=True)
+    save_path = out_path if out_path is not None else os.path.join("figures", "vis_pc.png")
+    cv2.imwrite(save_path, vis_img)
 
 
-def ply2npy(ply):
-    return np.array(ply.points)
+def vis_img_3d(img, image_points, labels=None, rt=True, out_path=None):
+    """
+    Draw projected 3D bounding boxes on camera image and save.
+    - img: (H,W,3) numpy array (BGR)
+    - image_points: (n,8,2) array of projected corners per box (in pixel coords)
+    - labels: optional labels for coloring
+    - rt: ignored for window display; kept for API compatibility
+    - out_path: optional save path. If None saves to figures/vis_img_3d.png
+    Returns annotated image.
+    """
+    if img is None:
+        return None
+    vis_img = img.copy()
+    if isinstance(image_points, np.ndarray) and image_points.ndim == 3 and image_points.shape[1] == 8:
+        for i in range(image_points.shape[0]):
+            pts = image_points[i].astype(np.int32)
+            # draw edges according to LINES
+            for l in LINES:
+                p1 = tuple(pts[l[0]])
+                p2 = tuple(pts[l[1]])
+                color = (int(COLORS_IMG[labels[i]][0]) if (labels is not None and 0 <= labels[i] < len(COLORS_IMG)) else 0,
+                         int(COLORS_IMG[labels[i]][1]) if (labels is not None and 0 <= labels[i] < len(COLORS_IMG)) else 0,
+                         int(COLORS_IMG[labels[i]][2]) if (labels is not None and 0 <= labels[i] < len(COLORS_IMG)) else 255)
+                cv2.line(vis_img, p1, p2, color, 2)
+            # draw corner points
+            for pt in pts:
+                cv2.circle(vis_img, tuple(int(x) for x in pt), radius=3, color=(0, 0, 255), thickness=-1)
 
+    os.makedirs("figures", exist_ok=True)
+    save_path = out_path if out_path is not None else os.path.join("figures", "vis_img_3d.png")
+    cv2.imwrite(save_path, vis_img)
+    return vis_img
 
-def bbox_obj(points, color=[1, 0, 0]):
-    colors = [color for i in range(len(LINES))]
-    line_set = o3d.geometry.LineSet(
-        points=o3d.utility.Vector3dVector(points),
-        lines=o3d.utility.Vector2iVector(LINES),
-    )
-    line_set.colors = o3d.utility.Vector3dVector(colors)
-    return line_set
-
-
-def vis_core(plys):
-    vis = o3d.visualization.Visualizer()
-    vis.create_window()
-
-    PAR = os.path.dirname(os.path.abspath(__file__))
-    ctr = vis.get_view_control()
-    param = o3d.io.read_pinhole_camera_parameters(os.path.join(PAR, 'viewpoint.json'))
-    for ply in plys:
-        vis.add_geometry(ply)
-    ctr.convert_from_pinhole_camera_parameters(param)
-
-    vis.run()
-    # param = vis.get_view_control().convert_to_pinhole_camera_parameters()
-    # o3d.io.write_pinhole_camera_parameters(os.path.join(PAR, 'viewpoint.json'), param)
-    vis.destroy_window()
-
-
-def vis_pc(pc, bboxes=None, labels=None):
-    '''
-    pc: ply or np.ndarray (N, 4)
-    bboxes: np.ndarray, (n, 7) or (n, 8, 3)
-    labels: (n, )
-    '''
-    if isinstance(pc, np.ndarray):
-        pc = npy2ply(pc)
-    
-    mesh_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
-    size=10, origin=[0, 0, 0])
-
-    if bboxes is None:
-        vis_core([pc, mesh_frame])
-        return
-    
-    if len(bboxes.shape) == 2:
-        bboxes = bbox3d2corners(bboxes)
-    
-    vis_objs = [pc, mesh_frame]
-    for i in range(len(bboxes)):
-        bbox = bboxes[i]
-        if labels is None:
-            color = [1, 1, 0]
-        else:
-            if labels[i] >= 0 and labels[i] < 3:
-                color = COLORS[labels[i]]
-            else:
-                color = COLORS[-1]
-        vis_objs.append(bbox_obj(bbox, color=color))
-    vis_core(vis_objs)
-
-
-def vis_img_3d(img, image_points, labels, rt=True):
-    '''
-    img: (h, w, 3)
-    image_points: (n, 8, 2)
-    labels: (n, )
-    '''
-
-    for i in range(len(image_points)):
-        label = labels[i]
-        bbox_points = image_points[i] # (8, 2)
-        if label >= 0 and label < 3:
-            color = COLORS_IMG[label]
-        else:
-            color = COLORS_IMG[-1]
-        for line_id in LINES:
-            x1, y1 = bbox_points[line_id[0]]
-            x2, y2 = bbox_points[line_id[1]]
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-            cv2.line(img, (x1, y1), (x2, y2), color, 1)
-    if rt:
-        return img
-    cv2.imshow('bbox', img)
-    cv2.waitKey(0)
