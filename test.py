@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import os
 import torch
+import pdb
 
 from pointpillars.utils import setup_seed, read_points, read_calib, read_label, \
     keep_bbox_from_image_range, keep_bbox_from_lidar_range, vis_pc, \
@@ -83,20 +84,13 @@ def main(args):
     lidar_bboxes = result_filter['lidar_bboxes']
     labels, scores = result_filter['labels'], result_filter['scores']
 
-    # ensure figures dir
-    os.makedirs("figures", exist_ok=True)
-    # save BEV visualization for predictions
-    pc_out = os.path.join("figures", f'{os.path.splitext(os.path.basename(args.pc_path))[0]}-bev.png')
-    print("[test] calling vis_pc ...", flush=True)
-    vis_pc(pc, bboxes=lidar_bboxes, labels=labels, out_path=pc_out)
+    vis_pc(pc, bboxes=lidar_bboxes, labels=labels)
 
     if calib_info is not None and img is not None:
         bboxes2d, camera_bboxes = result_filter['bboxes2d'], result_filter['camera_bboxes'] 
         bboxes_corners = bbox3d2corners_camera(camera_bboxes)
         image_points = points_camera2image(bboxes_corners, P2)
-        img_out = os.path.join("figures", f'{os.path.splitext(os.path.basename(args.img_path))[0]}-pred-3d_bbox.png')
-        print("[test] calling vis_img_3d ...", flush=True)
-        img = vis_img_3d(img, image_points, labels, rt=True, out_path=img_out)
+        img = vis_img_3d(img, image_points, labels, rt=True)
 
     if calib_info is not None and gt_label is not None:
         tr_velo_to_cam = calib_info['Tr_velo_to_cam'].astype(np.float32)
@@ -117,45 +111,28 @@ def main(args):
         
         pred_gt_lidar_bboxes = np.concatenate([lidar_bboxes, gt_lidar_bboxes], axis=0)
         pred_gt_labels = np.concatenate([labels, gt_labels])
-        # save BEV visualization that includes predictions + GT
-        pc_gt_out = os.path.join("figures", f'{os.path.splitext(os.path.basename(args.pc_path))[0]}-pred_gt-bev.png')
-        print("[test] calling vis_pc with GT ...", flush=True)
-        vis_pc(pc, bboxes=pred_gt_lidar_bboxes, labels=pred_gt_labels, out_path=pc_gt_out)
+        vis_pc(pc, pred_gt_lidar_bboxes, labels=pred_gt_labels)
 
         if img is not None:
             bboxes_corners = bbox3d2corners_camera(bboxes_camera)
             image_points = points_camera2image(bboxes_corners, P2)
-            gt_img_out = os.path.join("figures", f'{os.path.splitext(os.path.basename(args.img_path))[0]}-gt-3d_bbox.png')
-            print("[test] calling vis_img_3d ...", flush=True)
-            img = vis_img_3d(img, image_points, gt_labels, rt=True, out_path=gt_img_out)
-
-
-if __name__ == "__main__":
-    import traceback, time
-
-    def log(*a): print("[test]", *a, flush=True)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", required=True)
-    parser.add_argument("--pc_path", required=True)
-    parser.add_argument("--calib_path", default="")
-    parser.add_argument("--img_path", default="")
-    parser.add_argument("--gt_path", default="")
-    parser.add_argument("--no_cuda", action="store_true")
+            gt_labels = [-1] * len(gt_label['name'])
+            img = vis_img_3d(img, image_points, gt_labels, rt=True)
+    
+    if calib_info is not None and img is not None:
+        cv2.imshow(f'{os.path.basename(args.img_path)}-3d bbox', img)
+        cv2.waitKey(0)
+            
+        
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Configuration Parameters')
+    parser.add_argument('--ckpt', default='pretrained/epoch_160.pth', help='your checkpoint for kitti')
+    parser.add_argument('--pc_path', help='your point cloud path')
+    parser.add_argument('--calib_path', default='', help='your calib file path')
+    parser.add_argument('--gt_path', default='', help='your ground truth path')
+    parser.add_argument('--img_path', default='', help='your image path')
+    parser.add_argument('--no_cuda', action='store_true',
+                        help='whether to use cuda')
     args = parser.parse_args()
 
-    log("args:", args)
-    log("cwd:", os.getcwd())
-    for p in ["ckpt", "pc_path", "calib_path", "img_path", "gt_path"]:
-        v = getattr(args, p)
-        if v:
-            log(f"path {p}='{v}' exists? {os.path.exists(v)}")
-
-    t0 = time.time()
-    try:
-        main(args)
-        log(f"main(args) finished in {time.time()-t0:.2f}s")
-    except Exception:
-        log("EXCEPTION in main:\n" + traceback.format_exc())
-
-    
+    main(args)
